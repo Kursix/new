@@ -5,6 +5,7 @@
 #include <thread>
 #include <atomic>
 #include <set>
+#include <unordered_map>
 #include <psapi.h>
 #include <winternl.h>
 
@@ -43,18 +44,24 @@ public:
 private:
     void FileWatchThread();
     void ProcessScanThread();
+    void NetworkScanThread();
     DWORD GetProcessUsingFile(const std::wstring& filePath);
     bool IsBrowserProcess(const std::wstring& processName);
     bool IsSuspiciousProcessName(const std::wstring& processName);
+    bool IsTrustedSystemProcess(const std::wstring& processName, const std::wstring& processPath);
+    bool ShouldThrottleDetection(DWORD pid, const std::string& key, int cooldownMs);
     std::string WideToUtf8(const std::wstring& in);
 
     std::atomic<bool> running{ false };
     std::thread watchThread;
     std::thread processThread;
+    std::thread networkThread;
     std::vector<std::wstring> watchPaths;
     std::set<std::wstring> monitoredFiles;
     std::set<DWORD> alertedPids;
     std::mutex alertedPidsMutex;
+    std::unordered_map<std::string, ULONGLONG> detectionCooldowns;
+    std::mutex cooldownMutex;
 };
 
 // NtQuerySystemInformation / NtQueryObject helpers

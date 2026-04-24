@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <vector>
+#include <unordered_set>
 #include <tlhelp32.h>
 #pragma comment(lib, "ntdll.lib")
 
@@ -58,7 +59,10 @@ bool RealTimeMonitor::ScanProcessMemoryForWebhook(DWORD pid, std::string& foundU
         "discordapp.com/api/webhooks",
         "canary.discord.com/api/webhooks",
         "api.telegram.org/bot",
-        "hooks.slack.com/services"
+        "hooks.slack.com/services",
+        "api.ipify.org",
+        "ifconfig.me",
+        "icanhazip.com"
     };
 
     while (VirtualQueryEx(hProcess, addr, &mbi, sizeof(mbi))) {
@@ -218,13 +222,17 @@ void RealTimeMonitor::FileWatchThread() {
                                     if (QueryFullProcessImageNameW(hProc, 0, procName, &size)) {
                                         std::wstring exeName = fs::path(procName).filename().wstring();
                                         std::string evidence = "PID: " + std::to_string(pid) + " Process: " + WideToUtf8(exeName);
-                                        if (!IsBrowserProcess(exeName)) {
+                                        if (!IsBrowserProcess(exeName) && !IsTrustedSystemProcess(exeName, procName)) {
                                             std::string webhook;
                                             if (ScanProcessMemoryForWebhook(pid, webhook)) {
-                                                AlertWithPID(pid, "Webhook Found", "Process contains webhook URL snippet", evidence + " | " + webhook, Severity::CRITICAL);
+                                                if (!ShouldThrottleDetection(pid, "webhook_mem", 7000)) {
+                                                    AlertWithPID(pid, "Webhook Found", "Process contains webhook URL snippet", evidence + " | " + webhook, Severity::CRITICAL);
+                                                }
                                             }
                                             else {
-                                                AlertWithPID(pid, "Real-Time File Access", "Non-browser process accessed sensitive file: " + WideToUtf8(fileName), evidence, Severity::HIGH);
+                                                if (!ShouldThrottleDetection(pid, "sensitive_file", 4000)) {
+                                                    AlertWithPID(pid, "Real-Time File Access", "Non-browser process accessed sensitive file: " + WideToUtf8(fileName), evidence, Severity::HIGH);
+                                                }
                                             }
                                         }
                                     }
@@ -259,6 +267,14 @@ void RealTimeMonitor::ProcessScanThread() {
                     if (pe.th32ProcessID <= 4) continue;
                     if (!IsSuspiciousProcessName(pe.szExeFile)) continue;
 
+                    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+                    if (!hProc) continue;
+                    WCHAR procPath[MAX_PATH] = { 0 };
+                    DWORD size = MAX_PATH;
+                    bool hasPath = QueryFullProcessImageNameW(hProc, 0, procPath, &size) != 0;
+                    CloseHandle(hProc);
+                    if (hasPath && IsTrustedSystemProcess(pe.szExeFile, procPath)) continue;
+
                     bool alreadyAlerted = false;
                     {
                         std::lock_guard<std::mutex> guard(alertedPidsMutex);
@@ -283,19 +299,89 @@ void RealTimeMonitor::ProcessScanThread() {
     }
 }
 
+void RealTimeMonitor::NetworkScanThread() {
+    while (running) {
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != INVALID_HANDLE_VALUE) {
+            PROCESSENTRY32W pe;
+            pe.dwSize = sizeof(PROCESSENTRY32W);
+            if (Process32FirstW(snap, &pe)) {
+                do {
+                    if (pe.th32ProcessID <= 4) continue;
+
+                    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+                    if (!hProc) continue;
+
+                    WCHAR procPath[MAX_PATH] = { 0 };
+                    DWORD size = MAX_PATH;
+                    bool okPath = QueryFullProcessImageNameW(hProc, 0, procPath, &size) != 0;
+                    CloseHandle(hProc);
+                    if (!okPath) continue;
+
+                    std::wstring exeName = fs::path(procPath).filename().wstring();
+                    if (IsTrustedSystemProcess(exeName, procPath)) continue;
+
+                    std::string webhook;
+                    if (ScanProcessMemoryForWebhook(pe.th32ProcessID, webhook) && !ShouldThrottleDetection(pe.th32ProcessID, "network_signal", 10000)) {
+                        bool likelyPost = webhook.find("POST") != std::string::npos || webhook.find("multipart") != std::string::npos;
+                        Severity sev = likelyPost ? Severity::CRITICAL : Severity::HIGH;
+                        std::string msg = likelyPost
+                            ? "Webhook indicator found with upload context (possible POST exfil)"
+                            : "Webhook or external IP lookup indicator found in memory";
+                        std::string evidence = "PID: " + std::to_string(pe.th32ProcessID) + " Process: " + WideToUtf8(exeName) + " | " + webhook;
+                        AlertWithPID(pe.th32ProcessID, "Network Indicator", msg, evidence, sev);
+                    }
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+        }
+        Sleep(2200);
+    }
+}
+
 void RealTimeMonitor::Start() {
     if (running) return;
     running = true;
     watchThread = std::thread(&RealTimeMonitor::FileWatchThread, this);
     processThread = std::thread(&RealTimeMonitor::ProcessScanThread, this);
+    networkThread = std::thread(&RealTimeMonitor::NetworkScanThread, this);
 }
 
 void RealTimeMonitor::Stop() {
     running = false;
     if (watchThread.joinable()) watchThread.join();
     if (processThread.joinable()) processThread.join();
+    if (networkThread.joinable()) networkThread.join();
 }
 
 RealTimeMonitor::~RealTimeMonitor() {
     Stop();
+}
+
+bool RealTimeMonitor::IsTrustedSystemProcess(const std::wstring& processName, const std::wstring& processPath) {
+    static const std::set<std::wstring> trustedNames = {
+        L"svchost.exe", L"services.exe", L"lsass.exe", L"wininit.exe", L"csrss.exe", L"smss.exe", L"dwm.exe"
+    };
+
+    std::wstring nameLower = processName;
+    std::wstring pathLower = processPath;
+    std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::towlower);
+    std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::towlower);
+
+    if (trustedNames.count(nameLower) == 0) return false;
+    return pathLower.find(L"\\windows\\system32\\") != std::wstring::npos ||
+        pathLower.find(L"\\windows\\syswow64\\") != std::wstring::npos;
+}
+
+bool RealTimeMonitor::ShouldThrottleDetection(DWORD pid, const std::string& key, int cooldownMs) {
+    std::string token = std::to_string(pid) + ":" + key;
+    ULONGLONG now = GetTickCount64();
+
+    std::lock_guard<std::mutex> guard(cooldownMutex);
+    auto it = detectionCooldowns.find(token);
+    if (it != detectionCooldowns.end() && (now - it->second) < static_cast<ULONGLONG>(cooldownMs)) {
+        return true;
+    }
+    detectionCooldowns[token] = now;
+    return false;
 }

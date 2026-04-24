@@ -12,6 +12,8 @@
 #include <deque>
 #include <mutex>
 #include <algorithm>
+#include <vector>
+#include <random>
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -19,10 +21,10 @@ template<typename T>
 T MathLerp(T a, T b, float t) { return (T)(a + (b - a) * t); }
 
 namespace Ratt1fy {
-    ImVec4 AccentColor = ImVec4(0.42f, 0.78f, 1.00f, 1.00f);
-    ImVec4 BgColor = ImVec4(0.04f, 0.05f, 0.08f, 0.86f);
-    ImVec4 CardBgColor = ImVec4(0.07f, 0.09f, 0.14f, 0.85f);
-    ImVec4 BorderColor = ImVec4(0.20f, 0.28f, 0.36f, 0.65f);
+    ImVec4 AccentColor = ImVec4(0.33f, 1.00f, 0.56f, 1.00f);
+    ImVec4 BgColor = ImVec4(0.02f, 0.08f, 0.05f, 0.88f);
+    ImVec4 CardBgColor = ImVec4(0.06f, 0.14f, 0.10f, 0.88f);
+    ImVec4 BorderColor = ImVec4(0.28f, 0.94f, 0.56f, 0.72f);
     float WindowRounding = 20.0f;
     float ElementRounding = 12.0f;
 }
@@ -44,6 +46,16 @@ bool g_MonitorRunning = false;
 bool g_BlockingEnabled = false;
 static int g_ActiveTab = 0;
 static float g_OverlayOpacity = 0.0f;
+
+struct Snowflake {
+    float x;
+    float y;
+    float speed;
+    float size;
+    float sway;
+};
+
+static std::vector<Snowflake> g_Snowflakes;
 
 int RiskFromSeverity(Severity s) {
     switch (s) {
@@ -83,18 +95,18 @@ void ApplySmoothStyle() {
     colors[ImGuiCol_WindowBg] = Ratt1fy::BgColor;
     colors[ImGuiCol_ChildBg] = Ratt1fy::CardBgColor;
     colors[ImGuiCol_Border] = Ratt1fy::BorderColor;
-    colors[ImGuiCol_FrameBg] = ImVec4(0.14f, 0.19f, 0.25f, 0.55f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.24f, 0.31f, 0.40f, 0.70f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.40f, 0.53f, 0.85f);
-    colors[ImGuiCol_Button] = ImVec4(0.17f, 0.24f, 0.34f, 0.65f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.42f, 0.58f, 0.92f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.32f, 0.55f, 0.73f, 0.95f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.11f, 0.26f, 0.20f, 0.58f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.16f, 0.39f, 0.30f, 0.75f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.19f, 0.50f, 0.37f, 0.90f);
+    colors[ImGuiCol_Button] = ImVec4(0.12f, 0.30f, 0.22f, 0.76f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.18f, 0.53f, 0.36f, 0.96f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.75f, 0.48f, 1.00f);
     colors[ImGuiCol_CheckMark] = Ratt1fy::AccentColor;
     colors[ImGuiCol_SliderGrab] = Ratt1fy::AccentColor;
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.52f, 0.86f, 1.00f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.14f, 0.21f, 0.31f, 0.58f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.42f, 0.54f, 0.88f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.31f, 0.53f, 0.72f, 0.90f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.48f, 1.00f, 0.68f, 1.00f);
+    colors[ImGuiCol_Header] = ImVec4(0.10f, 0.32f, 0.22f, 0.62f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.17f, 0.48f, 0.32f, 0.90f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.24f, 0.64f, 0.42f, 0.94f);
 }
 
 void RealTimeMonitor::Alert(const std::string& category, const std::string& msg,
@@ -126,9 +138,32 @@ void DrawBackgroundDecor() {
     g_OverlayOpacity = MathLerp(g_OverlayOpacity, 195.0f, io.DeltaTime * 2.7f);
     draw->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 8, 14, (int)g_OverlayOpacity));
 
-    for (int i = 0; i < 9; ++i) {
-        float x = (io.DisplaySize.x / 8.0f) * i;
-        draw->AddCircleFilled(ImVec2(x, 120.0f + 26.0f * i), 130.0f, IM_COL32(70, 150, 255, 10), 64);
+    if (g_Snowflakes.empty()) {
+        std::mt19937 rng((unsigned)GetTickCount64());
+        std::uniform_real_distribution<float> xdist(0.0f, io.DisplaySize.x);
+        std::uniform_real_distribution<float> ydist(0.0f, io.DisplaySize.y);
+        std::uniform_real_distribution<float> speed(24.0f, 86.0f);
+        std::uniform_real_distribution<float> size(1.0f, 3.8f);
+        std::uniform_real_distribution<float> sway(0.4f, 1.8f);
+        for (int i = 0; i < 160; ++i) {
+            g_Snowflakes.push_back({ xdist(rng), ydist(rng), speed(rng), size(rng), sway(rng) });
+        }
+    }
+
+    float time = ImGui::GetTime();
+    for (auto& flake : g_Snowflakes) {
+        flake.y += flake.speed * io.DeltaTime;
+        flake.x += sinf(time * flake.sway + flake.y * 0.02f) * 12.0f * io.DeltaTime;
+        if (flake.y > io.DisplaySize.y + 10.0f) {
+            flake.y = -10.0f;
+            flake.x = fmodf(flake.x + 90.0f, io.DisplaySize.x);
+        }
+        draw->AddCircleFilled(ImVec2(flake.x, flake.y), flake.size, IM_COL32(210, 255, 225, 180), 12);
+    }
+
+    for (int i = 0; i < 8; ++i) {
+        float x = (io.DisplaySize.x / 7.0f) * i;
+        draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, 12), 64);
     }
 }
 
@@ -136,21 +171,21 @@ void DrawNotifications() {
     std::lock_guard<std::mutex> lock(g_AlertMutex);
     float dt = ImGui::GetIO().DeltaTime;
     ImVec2 viewSize = ImGui::GetIO().DisplaySize;
-    float currentY = 25.0f;
+    float currentY = viewSize.y - 20.0f;
 
     for (auto& alert : g_Alerts) {
         if (alert.lifeTime <= 0.0f) continue;
 
         float alpha = (alert.lifeTime < 1.0f) ? alert.lifeTime : 1.0f;
-        ImGui::SetNextWindowPos(ImVec2(viewSize.x - 430, currentY), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(viewSize.x - 430, currentY), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(400, 0));
         ImGui::SetNextWindowBgAlpha(alpha * 0.88f);
 
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.72f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.42f, 1.0f, 0.62f, 1.0f));
         ImGui::Begin((std::string("##alert_") + alert.time + alert.title).c_str(), nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
 
-        ImGui::TextColored(ImVec4(0.62f, 0.88f, 1.0f, 1.0f), "INTERCEPTED • %s", alert.title.c_str());
+        ImGui::TextColored(ImVec4(0.58f, 1.0f, 0.70f, 1.0f), "INTERCEPTED • %s", alert.title.c_str());
         ImGui::TextWrapped("%s", alert.message.c_str());
         ImGui::Separator();
         ImGui::Text("Risk: %d%% (%s)", alert.riskPercent, RiskLabel(alert.riskPercent));
@@ -159,7 +194,7 @@ void DrawNotifications() {
         ImGui::PopStyleColor();
 
         alert.lifeTime -= dt;
-        currentY += ImGui::GetWindowHeight() + 12.0f;
+        currentY -= ImGui::GetWindowHeight() + 12.0f;
     }
 }
 
@@ -179,17 +214,17 @@ void RenderRattifyUI(ImFont* titleFont) {
 
         ImDrawList* fg = ImGui::GetWindowDrawList();
         fg->AddRectFilledMultiColor(sideMin, sideMax,
-            IM_COL32(28, 46, 74, 210), IM_COL32(40, 81, 121, 210),
-            IM_COL32(15, 28, 48, 210), IM_COL32(22, 43, 70, 210));
+            IM_COL32(12, 56, 35, 220), IM_COL32(22, 112, 64, 220),
+            IM_COL32(8, 36, 24, 220), IM_COL32(12, 68, 40, 220));
 
         ImGui::BeginChild("Sidebar", ImVec2(245, 0), true);
         {
             ImGui::SetCursorPos(ImVec2(28, 32));
             if (titleFont) ImGui::PushFont(titleFont);
-            ImGui::TextColored(ImVec4(0.70f, 0.90f, 1.0f, 1.0f), "RATT1FY");
+            ImGui::TextColored(ImVec4(0.56f, 1.0f, 0.68f, 1.0f), "RATT1FY");
             if (titleFont) ImGui::PopFont();
             ImGui::SetCursorPosX(28);
-            ImGui::TextColored(ImVec4(0.64f, 0.72f, 0.82f, 0.92f), "Stealer Detection Console");
+            ImGui::TextColored(ImVec4(0.74f, 0.98f, 0.82f, 0.98f), "Neon Detection Console");
 
             ImGui::SetCursorPosY(120);
             const char* tabs[] = { "Dashboard", "Interceptor Log", "Settings", "Exit" };
@@ -234,7 +269,7 @@ void RenderRattifyUI(ImFont* titleFont) {
                 }
                 ImGui::Text("Intercepted events: %d", totalEvents);
                 ImGui::Text("Critical events: %d", critical);
-                ImGui::TextWrapped("Enabled detections: sensitive file access, webhook patterns, suspicious process-name heuristics.");
+                ImGui::TextWrapped("Enabled detections: sensitive file access, webhook and IP-lookup memory patterns, suspicious process-name heuristics, trusted system-process suppression, and cooldown throttling.");
             }
             else if (g_ActiveTab == 1) {
                 ImGui::Text("INTERCEPTOR CONSOLE");
