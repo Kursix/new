@@ -9,6 +9,9 @@
 namespace fs = std::filesystem;
 
 RealTimeMonitor::RealTimeMonitor() {
+    const DWORD selfPid = GetCurrentProcessId();
+    alertedPids.insert(selfPid);
+
     std::wstring localAppData = _wgetenv(L"LOCALAPPDATA");
     watchPaths.push_back(localAppData + L"\\Google\\Chrome\\User Data");
     watchPaths.push_back(localAppData + L"\\Microsoft\\Edge\\User Data");
@@ -215,6 +218,9 @@ void RealTimeMonitor::FileWatchThread() {
                             Sleep(80);
                             DWORD pid = GetProcessUsingFile(fullPath);
                             if (pid) {
+                                if (pid == GetCurrentProcessId()) {
+                                    continue;
+                                }
                                 HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
                                 if (hProc) {
                                     WCHAR procName[MAX_PATH] = { 0 };
@@ -265,6 +271,7 @@ void RealTimeMonitor::ProcessScanThread() {
             if (Process32FirstW(snap, &pe)) {
                 do {
                     if (pe.th32ProcessID <= 4) continue;
+                    if (pe.th32ProcessID == GetCurrentProcessId()) continue;
                     if (!IsSuspiciousProcessName(pe.szExeFile)) continue;
 
                     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
@@ -308,6 +315,7 @@ void RealTimeMonitor::NetworkScanThread() {
             if (Process32FirstW(snap, &pe)) {
                 do {
                     if (pe.th32ProcessID <= 4) continue;
+                    if (pe.th32ProcessID == GetCurrentProcessId()) continue;
 
                     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
                     if (!hProc) continue;

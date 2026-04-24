@@ -22,8 +22,8 @@ T MathLerp(T a, T b, float t) { return (T)(a + (b - a) * t); }
 
 namespace Ratt1fy {
     ImVec4 AccentColor = ImVec4(0.33f, 1.00f, 0.56f, 1.00f);
-    ImVec4 BgColor = ImVec4(0.02f, 0.08f, 0.05f, 0.88f);
-    ImVec4 CardBgColor = ImVec4(0.06f, 0.14f, 0.10f, 0.88f);
+    ImVec4 BgColor = ImVec4(0.02f, 0.08f, 0.05f, 0.42f);
+    ImVec4 CardBgColor = ImVec4(0.06f, 0.14f, 0.10f, 0.56f);
     ImVec4 BorderColor = ImVec4(0.28f, 0.94f, 0.56f, 0.72f);
     float WindowRounding = 20.0f;
     float ElementRounding = 12.0f;
@@ -135,8 +135,7 @@ void DrawBackgroundDecor() {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
-    g_OverlayOpacity = MathLerp(g_OverlayOpacity, 195.0f, io.DeltaTime * 2.7f);
-    draw->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 8, 14, (int)g_OverlayOpacity));
+    g_OverlayOpacity = MathLerp(g_OverlayOpacity, 56.0f, io.DeltaTime * 2.7f);
 
     if (g_Snowflakes.empty()) {
         std::mt19937 rng((unsigned)GetTickCount64());
@@ -158,12 +157,12 @@ void DrawBackgroundDecor() {
             flake.y = -10.0f;
             flake.x = fmodf(flake.x + 90.0f, io.DisplaySize.x);
         }
-        draw->AddCircleFilled(ImVec2(flake.x, flake.y), flake.size, IM_COL32(210, 255, 225, 180), 12);
+        draw->AddCircleFilled(ImVec2(flake.x, flake.y), flake.size, IM_COL32(210, 255, 225, 160), 12);
     }
 
     for (int i = 0; i < 8; ++i) {
         float x = (io.DisplaySize.x / 7.0f) * i;
-        draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, 12), 64);
+        draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, (int)g_OverlayOpacity), 64);
     }
 }
 
@@ -254,6 +253,18 @@ void RenderRattifyUI(ImFont* titleFont) {
                     if (g_Monitor) g_MonitorRunning ? g_Monitor->Start() : g_Monitor->Stop();
                 }
 
+                ImGui::SameLine();
+                if (ImGui::Button("Run Webhook Self-Test", ImVec2(260, 54))) {
+                    if (g_Monitor) {
+                        g_Monitor->Alert(
+                            "Self-Test",
+                            "Synthetic webhook detection test triggered from UI",
+                            "Local validation only. No outbound request was made.",
+                            Severity::INFO
+                        );
+                    }
+                }
+
                 ImGui::Spacing();
                 ImGui::Checkbox("Auto-Block on High/Critical", &g_BlockingEnabled);
                 if (g_Monitor) g_Monitor->enableBlocking = g_BlockingEnabled;
@@ -314,7 +325,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int main() {
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "RattifyClass", NULL };
     RegisterClassEx(&wc);
-    HWND hwnd = CreateWindowEx(WS_EX_TOPMOST, wc.lpszClassName, "Ratt1fy Guard", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), NULL, NULL, wc.hInstance, NULL);
+    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, "Ratt1fy Guard", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), NULL, NULL, wc.hInstance, NULL);
 
     HDC hdc = GetDC(hwnd);
     PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32 };
@@ -349,7 +360,7 @@ int main() {
 
         ImGui::Render();
         glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(0, 0, 0, 0);
+        glClearColor(0.05f, 0.10f, 0.07f, 0.15f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SwapBuffers(hdc);
