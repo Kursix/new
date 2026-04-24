@@ -41,10 +41,21 @@ public:
     // Webhook scanner (memory scan)
     bool ScanProcessMemoryForWebhook(DWORD pid, std::string& foundUrl);
 
+    struct MemoryFinding {
+        std::string family;
+        std::string pattern;
+        std::string snippet;
+        Severity severity;
+    };
+
 private:
     void FileWatchThread();
     void ProcessScanThread();
     void NetworkScanThread();
+    bool ScanProcessMemoryAdvanced(DWORD pid, std::vector<MemoryFinding>& findings, size_t maxFindings);
+    void AnalyzeAndAlertFindings(DWORD pid, const std::wstring& exeName, const std::vector<MemoryFinding>& findings);
+    Severity EscalateSeverityFromFindingSet(const std::vector<MemoryFinding>& findings) const;
+    std::string BuildFindingSummary(const std::vector<MemoryFinding>& findings, size_t maxItems) const;
     DWORD GetProcessUsingFile(const std::wstring& filePath);
     bool IsBrowserProcess(const std::wstring& processName);
     bool IsSuspiciousProcessName(const std::wstring& processName);
