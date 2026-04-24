@@ -9,11 +9,13 @@
 #pragma comment(lib, "opengl32.lib")
 
 #include <windows.h>
+#include <winhttp.h>
 #include <deque>
 #include <mutex>
 #include <algorithm>
 #include <vector>
 #include <random>
+#pragma comment(lib, "winhttp.lib")
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -46,6 +48,8 @@ bool g_MonitorRunning = false;
 bool g_BlockingEnabled = false;
 static int g_ActiveTab = 0;
 static float g_OverlayOpacity = 0.0f;
+static char g_TestWebhookUrl[512] = "";
+static std::string g_TestWebhookStatus;
 
 struct Snowflake {
     float x;
@@ -56,6 +60,88 @@ struct Snowflake {
 };
 
 static std::vector<Snowflake> g_Snowflakes;
+
+bool SendWebhookTestMessage(const std::string& webhookUrl, std::string& errorOut) {
+    if (webhookUrl.empty() || webhookUrl.find("https://") != 0) {
+        errorOut = "Webhook URL must start with https://";
+        return false;
+    }
+    if (webhookUrl.find("discord.com/api/webhooks/") == std::string::npos &&
+        webhookUrl.find("discordapp.com/api/webhooks/") == std::string::npos) {
+        errorOut = "Only Discord webhook URLs are allowed for this test";
+        return false;
+    }
+
+    std::wstring wideUrl(webhookUrl.begin(), webhookUrl.end());
+    URL_COMPONENTS comps{};
+    wchar_t host[256] = { 0 };
+    wchar_t path[1024] = { 0 };
+    comps.dwStructSize = sizeof(comps);
+    comps.lpszHostName = host;
+    comps.dwHostNameLength = _countof(host);
+    comps.lpszUrlPath = path;
+    comps.dwUrlPathLength = _countof(path);
+
+    if (!WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &comps)) {
+        errorOut = "Could not parse webhook URL";
+        return false;
+    }
+
+    std::wstring hostName(comps.lpszHostName, comps.dwHostNameLength);
+    std::wstring pathName(comps.lpszUrlPath, comps.dwUrlPathLength);
+    std::string payload = "{\"content\":\"Ratt1fy webhook self-test message for interceptor validation.\"}";
+
+    HINTERNET hSession = WinHttpOpen(L"Ratt1fy/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        errorOut = "WinHttpOpen failed";
+        return false;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, hostName.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        errorOut = "WinHttpConnect failed";
+        return false;
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", pathName.c_str(), nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        errorOut = "WinHttpOpenRequest failed";
+        return false;
+    }
+
+    const wchar_t* headers = L"Content-Type: application/json\r\n";
+    BOOL ok = WinHttpSendRequest(hRequest, headers, -1,
+        (LPVOID)payload.c_str(), (DWORD)payload.size(),
+        (DWORD)payload.size(), 0);
+
+    if (!ok || !WinHttpReceiveResponse(hRequest, nullptr)) {
+        errorOut = "Failed sending or receiving webhook response";
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    if (statusCode < 200 || statusCode >= 300) {
+        errorOut = "Webhook returned HTTP " + std::to_string(statusCode);
+        return false;
+    }
+    return true;
+}
 
 int RiskFromSeverity(Severity s) {
     switch (s) {
@@ -268,6 +354,28 @@ void RenderRattifyUI(ImFont* titleFont) {
                 ImGui::Spacing();
                 ImGui::Checkbox("Auto-Block on High/Critical", &g_BlockingEnabled);
                 if (g_Monitor) g_Monitor->enableBlocking = g_BlockingEnabled;
+
+                ImGui::Spacing();
+                ImGui::InputText("Discord Webhook URL", g_TestWebhookUrl, IM_ARRAYSIZE(g_TestWebhookUrl));
+                if (ImGui::Button("Send Webhook Test Message", ImVec2(260, 40))) {
+                    std::string err;
+                    bool sent = SendWebhookTestMessage(g_TestWebhookUrl, err);
+                    if (sent) {
+                        g_TestWebhookStatus = "Webhook test sent successfully";
+                        if (g_Monitor) {
+                            g_Monitor->Alert("Webhook Test", "Manual webhook test message sent", g_TestWebhookUrl, Severity::INFO);
+                        }
+                    }
+                    else {
+                        g_TestWebhookStatus = "Webhook test failed: " + err;
+                        if (g_Monitor) {
+                            g_Monitor->Alert("Webhook Test", "Manual webhook test failed", err, Severity::LOW);
+                        }
+                    }
+                }
+                if (!g_TestWebhookStatus.empty()) {
+                    ImGui::TextWrapped("%s", g_TestWebhookStatus.c_str());
+                }
 
                 ImGui::Spacing();
                 ImGui::Separator();
