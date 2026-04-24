@@ -58,6 +58,7 @@ static int g_NetworkScanMs = 2200;
 static char g_ExcludeProcessInput[128] = "";
 static char g_LogSearch[128] = "";
 static int g_MinSeverityFilter = 0;
+static bool g_LowPowerMode = false;
 
 struct Snowflake {
     float x;
@@ -246,14 +247,16 @@ void DrawBackgroundDecor() {
 
     g_OverlayOpacity = MathLerp(g_OverlayOpacity, 56.0f, io.DeltaTime * 2.7f);
 
-    if (g_Snowflakes.empty()) {
+    size_t desiredFlakeCount = g_LowPowerMode ? 60 : 160;
+    if (g_Snowflakes.size() != desiredFlakeCount) {
+        g_Snowflakes.clear();
         std::mt19937 rng((unsigned)GetTickCount64());
         std::uniform_real_distribution<float> xdist(0.0f, io.DisplaySize.x);
         std::uniform_real_distribution<float> ydist(0.0f, io.DisplaySize.y);
         std::uniform_real_distribution<float> speed(24.0f, 86.0f);
         std::uniform_real_distribution<float> size(1.0f, 3.8f);
         std::uniform_real_distribution<float> sway(0.4f, 1.8f);
-        for (int i = 0; i < 160; ++i) {
+        for (size_t i = 0; i < desiredFlakeCount; ++i) {
             g_Snowflakes.push_back({ xdist(rng), ydist(rng), speed(rng), size(rng), sway(rng) });
         }
     }
@@ -269,10 +272,26 @@ void DrawBackgroundDecor() {
         draw->AddCircleFilled(ImVec2(flake.x, flake.y), flake.size, IM_COL32(210, 255, 225, 160), 12);
     }
 
-    for (int i = 0; i < 8; ++i) {
-        float x = (io.DisplaySize.x / 7.0f) * i;
-        draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, (int)g_OverlayOpacity), 64);
+    if (!g_LowPowerMode) {
+        for (int i = 0; i < 8; ++i) {
+            float x = (io.DisplaySize.x / 7.0f) * i;
+            draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, (int)g_OverlayOpacity), 64);
+        }
     }
+}
+
+void RunFullDetectionSelfTest() {
+    if (!g_Monitor) return;
+    g_Monitor->Alert("Self-Test", "Browser DB access heuristic simulated", "Synthetic: Login Data read by non-browser", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "DPAPI theft heuristic simulated", "Synthetic: CryptUnprotectData + Login Data combo", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "Webhook exfil heuristic simulated", "Synthetic: discord.com/api/webhooks POST", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "External IP lookup heuristic simulated", "Synthetic: api.ipify.org + ifconfig.me", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "Registry persistence heuristic simulated", "Synthetic: HKCU\\...\\Run WindowsUpdate", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "Startup folder persistence heuristic simulated", "Synthetic: Startup\\svchost.exe", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "WMI subscription persistence heuristic simulated", "Synthetic: __EventFilter + CommandLineEventConsumer", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "Anti-analysis VM check heuristic simulated", "Synthetic: VMware/VirtualBox registry probes", Severity::MEDIUM);
+    g_Monitor->Alert("Self-Test", "AMSI/ETW patching heuristic simulated", "Synthetic: AmsiScanBuffer/EtwEventWrite patch attempt", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "RAT C2 beacon heuristic simulated", "Synthetic: AsyncRAT/remcos reverse_tcp", Severity::CRITICAL);
 }
 
 void DrawNotifications() {
@@ -380,6 +399,7 @@ void RenderRattifyUI(ImFont* titleFont) {
                 if (g_Monitor) g_Monitor->enableBlocking = g_BlockingEnabled;
 
                 ImGui::Checkbox("Pause Toast Notifications", &g_PauseToasts);
+                ImGui::Checkbox("Low-Power UI (higher FPS)", &g_LowPowerMode);
 
                 ImGui::SliderInt("Process Scan Interval (ms)", &g_ProcessScanMs, 400, 8000);
                 ImGui::SliderInt("Network Scan Interval (ms)", &g_NetworkScanMs, 600, 12000);
@@ -409,6 +429,10 @@ void RenderRattifyUI(ImFont* titleFont) {
                 if (ImGui::Button("Export Event Snapshot", ImVec2(260, 32))) {
                     bool ok = ExportEventSnapshot("detections_snapshot.txt");
                     g_TestWebhookStatus = ok ? "Exported detections_snapshot.txt" : "Failed to export snapshot";
+                }
+
+                if (ImGui::Button("Run Full Detection Self-Test", ImVec2(260, 32))) {
+                    RunFullDetectionSelfTest();
                 }
 
                 ImGui::Spacing();

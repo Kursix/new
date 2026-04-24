@@ -40,13 +40,36 @@ namespace {
             {"anti_analysis", "CheckRemoteDebuggerPresent", Severity::MEDIUM},
             {"anti_analysis", "NtSetInformationThread", Severity::MEDIUM},
             {"anti_analysis", "ThreadHideFromDebugger", Severity::MEDIUM},
+            {"anti_analysis", "VMware Tools", Severity::MEDIUM},
+            {"anti_analysis", "VirtualBox Guest Additions", Severity::MEDIUM},
+            {"anti_analysis", "qemu-ga.exe", Severity::MEDIUM},
+            {"anti_analysis", "getmac", Severity::LOW},
             {"archive", "passwords.txt", Severity::HIGH},
             {"archive", "cookies.txt", Severity::HIGH},
             {"archive", "discord_tokens.txt", Severity::HIGH},
+            {"archive", "wallets/", Severity::HIGH},
+            {"archive", "login_data_", Severity::HIGH},
+            {"archive", "cookies_", Severity::HIGH},
+            {"archive", "history_", Severity::MEDIUM},
             {"archive", ".zip", Severity::MEDIUM},
             {"network_upload", "multipart/form-data", Severity::CRITICAL},
             {"network_upload", "Content-Disposition: form-data", Severity::CRITICAL},
-            {"network_upload", "POST /api/webhooks", Severity::CRITICAL}
+            {"network_upload", "POST /api/webhooks", Severity::CRITICAL},
+            {"persistence", "Software\\Microsoft\\Windows\\CurrentVersion\\Run", Severity::HIGH},
+            {"persistence", "WindowsUpdate", Severity::MEDIUM},
+            {"persistence", "Start Menu\\Programs\\Startup", Severity::HIGH},
+            {"persistence", "__EventFilter", Severity::HIGH},
+            {"persistence", "CommandLineEventConsumer", Severity::HIGH},
+            {"persistence", "__FilterToConsumerBinding", Severity::HIGH},
+            {"memory_patch", "AmsiScanBuffer", Severity::CRITICAL},
+            {"memory_patch", "EtwEventWrite", Severity::CRITICAL},
+            {"rat", "AsyncRAT", Severity::CRITICAL},
+            {"rat", "njRAT", Severity::CRITICAL},
+            {"rat", "QuasarRAT", Severity::CRITICAL},
+            {"rat", "Remcos", Severity::CRITICAL},
+            {"rat", "DarkComet", Severity::CRITICAL},
+            {"rat", "reverse_tcp", Severity::HIGH},
+            {"rat", "meterpreter", Severity::CRITICAL}
         };
     }
 
@@ -546,6 +569,17 @@ void RealTimeMonitor::NetworkScanThread() {
                             : "Webhook or external IP lookup indicator found in memory";
                         std::string evidence = "PID: " + std::to_string(pe.th32ProcessID) + " Process: " + WideToUtf8(exeName) + " | " + webhook;
                         AlertWithPID(pe.th32ProcessID, "Network Indicator", msg, evidence, sev);
+
+                        MessageBeep(MB_ICONWARNING);
+                        if (sev == Severity::CRITICAL && !ShouldThrottleDetection(pe.th32ProcessID, "connection_prompt", 30000)) {
+                            std::wstring prompt = L"Ratt1fy detected a potentially unsafe outbound connection by " + exeName +
+                                L".\nAllow this connection process to continue?\nChoose NO to block the process.";
+                            int res = MessageBoxW(nullptr, prompt.c_str(), L"Ratt1fy Connection Safety Prompt", MB_YESNO | MB_ICONWARNING | MB_SYSTEMMODAL);
+                            if (res == IDNO) {
+                                AlertWithPID(pe.th32ProcessID, "Connection Blocked", "User denied risky connection from prompt", WideToUtf8(exeName), Severity::CRITICAL);
+                                BlockProcess(pe.th32ProcessID);
+                            }
+                        }
                     }
 
                     std::vector<MemoryFinding> findings;
