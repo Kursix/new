@@ -77,6 +77,12 @@ RealTimeMonitor::RealTimeMonitor() {
     monitoredFiles.insert(L"Cookies");
     monitoredFiles.insert(L"Network\\Cookies");
     monitoredFiles.insert(L"*.ldb");
+
+    // default false-positive suppressions for common local toolchain executables
+    AddProcessExclusion(L"vcpkg.exe");
+    AddProcessExclusion(L"cmake.exe");
+    AddProcessExclusion(L"ninja.exe");
+    AddProcessExclusion(L"cl.exe");
 }
 
 std::string RealTimeMonitor::WideToUtf8(const std::wstring& in) {
@@ -89,6 +95,7 @@ std::string RealTimeMonitor::WideToUtf8(const std::wstring& in) {
 }
 
 void RealTimeMonitor::AlertWithPID(DWORD pid, const std::string& category, const std::string& msg, const std::string& evidence, Severity s) {
+    totalDetections.fetch_add(1);
     Alert(category, msg, evidence, s);
     if (enableBlocking && static_cast<int>(s) >= static_cast<int>(Severity::HIGH)) {
         BlockProcess(pid);
@@ -101,6 +108,7 @@ void RealTimeMonitor::BlockProcess(DWORD pid) {
         if (TerminateProcess(hProcess, 1)) {
             std::string msg = "Process (PID=" + std::to_string(pid) + ") terminated by StealerGuard.";
             LogDetection("Blocking", msg, "", Severity::CRITICAL);
+            totalBlocked.fetch_add(1);
         }
         CloseHandle(hProcess);
     }
@@ -149,6 +157,7 @@ bool RealTimeMonitor::ScanProcessMemoryForWebhook(DWORD pid, std::string& foundU
 }
 
 bool RealTimeMonitor::ScanProcessMemoryAdvanced(DWORD pid, std::vector<MemoryFinding>& findings, size_t maxFindings) {
+    totalAdvancedScans.fetch_add(1);
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
     if (!hProcess) return false;
 
@@ -328,6 +337,38 @@ bool RealTimeMonitor::IsSuspiciousProcessName(const std::wstring& processName) {
     return false;
 }
 
+void RealTimeMonitor::AddProcessExclusion(const std::wstring& processName) {
+    if (processName.empty()) return;
+    std::wstring lower = processName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    std::lock_guard<std::mutex> guard(exclusionMutex);
+    excludedProcessNames.insert(lower);
+}
+
+bool RealTimeMonitor::IsExplicitlyExcluded(const std::wstring& processName) {
+    std::wstring lower = processName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    std::lock_guard<std::mutex> guard(exclusionMutex);
+    return excludedProcessNames.find(lower) != excludedProcessNames.end();
+}
+
+void RealTimeMonitor::SetScanIntervals(int processMs, int networkMs) {
+    processScanIntervalMs.store(std::clamp(processMs, 400, 10000));
+    networkScanIntervalMs.store(std::clamp(networkMs, 600, 15000));
+}
+
+void RealTimeMonitor::RequestOneShotScan() {
+    oneShotScanRequested.store(true);
+}
+
+RealTimeMonitor::MonitorStats RealTimeMonitor::GetStats() const {
+    MonitorStats s;
+    s.detections = totalDetections.load();
+    s.blocked = totalBlocked.load();
+    s.advancedScans = totalAdvancedScans.load();
+    return s;
+}
+
 void RealTimeMonitor::FileWatchThread() {
     DebugLog("File watch thread started");
     for (const auto& dir : watchPaths) {
@@ -387,7 +428,7 @@ void RealTimeMonitor::FileWatchThread() {
                                     if (QueryFullProcessImageNameW(hProc, 0, procName, &size)) {
                                         std::wstring exeName = fs::path(procName).filename().wstring();
                                         std::string evidence = "PID: " + std::to_string(pid) + " Process: " + WideToUtf8(exeName);
-                                        if (!IsBrowserProcess(exeName) && !IsTrustedSystemProcess(exeName, procName)) {
+                                        if (!IsBrowserProcess(exeName) && !IsTrustedSystemProcess(exeName, procName) && !IsExplicitlyExcluded(exeName)) {
                                             std::string webhook;
                                             if (ScanProcessMemoryForWebhook(pid, webhook)) {
                                                 if (!ShouldThrottleDetection(pid, "webhook_mem", 7000)) {
@@ -423,6 +464,7 @@ void RealTimeMonitor::FileWatchThread() {
 
 void RealTimeMonitor::ProcessScanThread() {
     while (running) {
+        bool forcePass = oneShotScanRequested.exchange(false);
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if (snap != INVALID_HANDLE_VALUE) {
             PROCESSENTRY32W pe;
@@ -431,7 +473,8 @@ void RealTimeMonitor::ProcessScanThread() {
                 do {
                     if (pe.th32ProcessID <= 4) continue;
                     if (pe.th32ProcessID == GetCurrentProcessId()) continue;
-                    if (!IsSuspiciousProcessName(pe.szExeFile)) continue;
+                    if (IsExplicitlyExcluded(pe.szExeFile)) continue;
+                    if (!forcePass && !IsSuspiciousProcessName(pe.szExeFile)) continue;
 
                     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
                     if (!hProc) continue;
@@ -466,7 +509,7 @@ void RealTimeMonitor::ProcessScanThread() {
             }
             CloseHandle(snap);
         }
-        Sleep(1500);
+        Sleep(processScanIntervalMs.load());
     }
 }
 
@@ -480,6 +523,7 @@ void RealTimeMonitor::NetworkScanThread() {
                 do {
                     if (pe.th32ProcessID <= 4) continue;
                     if (pe.th32ProcessID == GetCurrentProcessId()) continue;
+                    if (IsExplicitlyExcluded(pe.szExeFile)) continue;
 
                     HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
                     if (!hProc) continue;
@@ -512,7 +556,7 @@ void RealTimeMonitor::NetworkScanThread() {
             }
             CloseHandle(snap);
         }
-        Sleep(2200);
+        Sleep(networkScanIntervalMs.load());
     }
 }
 

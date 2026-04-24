@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <vector>
 #include <random>
+#include <fstream>
+#include <cstring>
 #pragma comment(lib, "winhttp.lib")
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -50,6 +52,12 @@ static int g_ActiveTab = 0;
 static float g_OverlayOpacity = 0.0f;
 static char g_TestWebhookUrl[512] = "";
 static std::string g_TestWebhookStatus;
+static bool g_PauseToasts = false;
+static int g_ProcessScanMs = 1500;
+static int g_NetworkScanMs = 2200;
+static char g_ExcludeProcessInput[128] = "";
+static char g_LogSearch[128] = "";
+static int g_MinSeverityFilter = 0;
 
 struct Snowflake {
     float x;
@@ -139,6 +147,21 @@ bool SendWebhookTestMessage(const std::string& webhookUrl, std::string& errorOut
     if (statusCode < 200 || statusCode >= 300) {
         errorOut = "Webhook returned HTTP " + std::to_string(statusCode);
         return false;
+    }
+    return true;
+}
+
+bool ExportEventSnapshot(const std::string& path) {
+    std::lock_guard<std::mutex> lock(g_AlertMutex);
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+
+    out << "Ratt1fy Event Snapshot\n";
+    out << "Generated: " << NowString() << "\n\n";
+    for (const auto& ev : g_Events) {
+        out << "[" << RiskLabel(ev.riskPercent) << "] " << ev.category << "\n";
+        out << "Message: " << ev.message << "\n";
+        out << "Evidence: " << ev.evidence << "\n\n";
     }
     return true;
 }
@@ -253,6 +276,7 @@ void DrawBackgroundDecor() {
 }
 
 void DrawNotifications() {
+    if (g_PauseToasts) return;
     std::lock_guard<std::mutex> lock(g_AlertMutex);
     float dt = ImGui::GetIO().DeltaTime;
     ImVec2 viewSize = ImGui::GetIO().DisplaySize;
@@ -355,6 +379,38 @@ void RenderRattifyUI(ImFont* titleFont) {
                 ImGui::Checkbox("Auto-Block on High/Critical", &g_BlockingEnabled);
                 if (g_Monitor) g_Monitor->enableBlocking = g_BlockingEnabled;
 
+                ImGui::Checkbox("Pause Toast Notifications", &g_PauseToasts);
+
+                ImGui::SliderInt("Process Scan Interval (ms)", &g_ProcessScanMs, 400, 8000);
+                ImGui::SliderInt("Network Scan Interval (ms)", &g_NetworkScanMs, 600, 12000);
+                if (ImGui::Button("Apply Scan Intervals", ImVec2(260, 32)) && g_Monitor) {
+                    g_Monitor->SetScanIntervals(g_ProcessScanMs, g_NetworkScanMs);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Run One-Shot Deep Scan", ImVec2(260, 32)) && g_Monitor) {
+                    g_Monitor->RequestOneShotScan();
+                }
+
+                ImGui::InputText("Exclude Process (exe)", g_ExcludeProcessInput, IM_ARRAYSIZE(g_ExcludeProcessInput));
+                if (ImGui::Button("Add Process Exclusion", ImVec2(260, 32)) && g_Monitor && strlen(g_ExcludeProcessInput) > 0) {
+                    std::wstring w;
+                    for (char c : std::string(g_ExcludeProcessInput)) w.push_back((wchar_t)c);
+                    g_Monitor->AddProcessExclusion(w);
+                    g_Monitor->Alert("Exclusion", "Process exclusion added", g_ExcludeProcessInput, Severity::INFO);
+                    g_ExcludeProcessInput[0] = '\0';
+                }
+
+                if (ImGui::Button("Clear In-Memory Events", ImVec2(260, 32))) {
+                    std::lock_guard<std::mutex> lock(g_AlertMutex);
+                    g_Events.clear();
+                    g_Alerts.clear();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Export Event Snapshot", ImVec2(260, 32))) {
+                    bool ok = ExportEventSnapshot("detections_snapshot.txt");
+                    g_TestWebhookStatus = ok ? "Exported detections_snapshot.txt" : "Failed to export snapshot";
+                }
+
                 ImGui::Spacing();
                 ImGui::InputText("Discord Webhook URL", g_TestWebhookUrl, IM_ARRAYSIZE(g_TestWebhookUrl));
                 if (ImGui::Button("Send Webhook Test Message", ImVec2(260, 40))) {
@@ -388,15 +444,32 @@ void RenderRattifyUI(ImFont* titleFont) {
                 }
                 ImGui::Text("Intercepted events: %d", totalEvents);
                 ImGui::Text("Critical events: %d", critical);
+                if (g_Monitor) {
+                    auto stats = g_Monitor->GetStats();
+                    ImGui::Text("Runtime detections: %d", stats.detections);
+                    ImGui::Text("Blocked processes: %d", stats.blocked);
+                    ImGui::Text("Advanced scans: %d", stats.advancedScans);
+                }
                 ImGui::TextWrapped("Enabled detections: sensitive file access, webhook and IP-lookup memory patterns, suspicious process-name heuristics, trusted system-process suppression, and cooldown throttling.");
             }
             else if (g_ActiveTab == 1) {
                 ImGui::Text("INTERCEPTOR CONSOLE");
                 ImGui::Separator();
+                ImGui::InputText("Search", g_LogSearch, IM_ARRAYSIZE(g_LogSearch));
+                ImGui::Combo("Min Severity", &g_MinSeverityFilter, "INFO\0LOW\0MEDIUM\0HIGH\0CRITICAL\0");
 
                 ImGui::BeginChild("LogScroll", ImVec2(0, 0), true);
                 std::lock_guard<std::mutex> lock(g_AlertMutex);
                 for (const auto& ev : g_Events) {
+                    if ((int)ev.severity < g_MinSeverityFilter) continue;
+                    if (strlen(g_LogSearch) > 0) {
+                        std::string query = g_LogSearch;
+                        if (ev.category.find(query) == std::string::npos &&
+                            ev.message.find(query) == std::string::npos &&
+                            ev.evidence.find(query) == std::string::npos) {
+                            continue;
+                        }
+                    }
                     ImVec4 c = ImVec4(0.60f, 0.84f, 1.f, 1.f);
                     if (ev.severity == Severity::HIGH) c = ImVec4(1.0f, 0.68f, 0.28f, 1.0f);
                     if (ev.severity == Severity::CRITICAL) c = ImVec4(1.0f, 0.34f, 0.34f, 1.0f);
