@@ -9,9 +9,15 @@
 #pragma comment(lib, "opengl32.lib")
 
 #include <windows.h>
+#include <winhttp.h>
 #include <deque>
 #include <mutex>
 #include <algorithm>
+#include <vector>
+#include <random>
+#include <fstream>
+#include <cstring>
+#pragma comment(lib, "winhttp.lib")
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -19,10 +25,10 @@ template<typename T>
 T MathLerp(T a, T b, float t) { return (T)(a + (b - a) * t); }
 
 namespace Ratt1fy {
-    ImVec4 AccentColor = ImVec4(0.42f, 0.78f, 1.00f, 1.00f);
-    ImVec4 BgColor = ImVec4(0.04f, 0.05f, 0.08f, 0.86f);
-    ImVec4 CardBgColor = ImVec4(0.07f, 0.09f, 0.14f, 0.85f);
-    ImVec4 BorderColor = ImVec4(0.20f, 0.28f, 0.36f, 0.65f);
+    ImVec4 AccentColor = ImVec4(0.33f, 1.00f, 0.56f, 1.00f);
+    ImVec4 BgColor = ImVec4(0.02f, 0.08f, 0.05f, 0.42f);
+    ImVec4 CardBgColor = ImVec4(0.06f, 0.14f, 0.10f, 0.56f);
+    ImVec4 BorderColor = ImVec4(0.28f, 0.94f, 0.56f, 0.72f);
     float WindowRounding = 20.0f;
     float ElementRounding = 12.0f;
 }
@@ -44,6 +50,122 @@ bool g_MonitorRunning = false;
 bool g_BlockingEnabled = false;
 static int g_ActiveTab = 0;
 static float g_OverlayOpacity = 0.0f;
+static char g_TestWebhookUrl[512] = "";
+static std::string g_TestWebhookStatus;
+static bool g_PauseToasts = false;
+static int g_ProcessScanMs = 1500;
+static int g_NetworkScanMs = 2200;
+static char g_ExcludeProcessInput[128] = "";
+static char g_LogSearch[128] = "";
+static int g_MinSeverityFilter = 0;
+static bool g_LowPowerMode = false;
+
+struct Snowflake {
+    float x;
+    float y;
+    float speed;
+    float size;
+    float sway;
+};
+
+static std::vector<Snowflake> g_Snowflakes;
+
+bool SendWebhookTestMessage(const std::string& webhookUrl, std::string& errorOut) {
+    if (webhookUrl.empty() || webhookUrl.find("https://") != 0) {
+        errorOut = "Webhook URL must start with https://";
+        return false;
+    }
+    if (webhookUrl.find("discord.com/api/webhooks/") == std::string::npos &&
+        webhookUrl.find("discordapp.com/api/webhooks/") == std::string::npos) {
+        errorOut = "Only Discord webhook URLs are allowed for this test";
+        return false;
+    }
+
+    std::wstring wideUrl(webhookUrl.begin(), webhookUrl.end());
+    URL_COMPONENTS comps{};
+    wchar_t host[256] = { 0 };
+    wchar_t path[1024] = { 0 };
+    comps.dwStructSize = sizeof(comps);
+    comps.lpszHostName = host;
+    comps.dwHostNameLength = _countof(host);
+    comps.lpszUrlPath = path;
+    comps.dwUrlPathLength = _countof(path);
+
+    if (!WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &comps)) {
+        errorOut = "Could not parse webhook URL";
+        return false;
+    }
+
+    std::wstring hostName(comps.lpszHostName, comps.dwHostNameLength);
+    std::wstring pathName(comps.lpszUrlPath, comps.dwUrlPathLength);
+    std::string payload = "{\"content\":\"Ratt1fy webhook self-test message for interceptor validation.\"}";
+
+    HINTERNET hSession = WinHttpOpen(L"Ratt1fy/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) {
+        errorOut = "WinHttpOpen failed";
+        return false;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, hostName.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        errorOut = "WinHttpConnect failed";
+        return false;
+    }
+
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", pathName.c_str(), nullptr,
+        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        errorOut = "WinHttpOpenRequest failed";
+        return false;
+    }
+
+    const wchar_t* headers = L"Content-Type: application/json\r\n";
+    BOOL ok = WinHttpSendRequest(hRequest, headers, -1,
+        (LPVOID)payload.c_str(), (DWORD)payload.size(),
+        (DWORD)payload.size(), 0);
+
+    if (!ok || !WinHttpReceiveResponse(hRequest, nullptr)) {
+        errorOut = "Failed sending or receiving webhook response";
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    if (statusCode < 200 || statusCode >= 300) {
+        errorOut = "Webhook returned HTTP " + std::to_string(statusCode);
+        return false;
+    }
+    return true;
+}
+
+bool ExportEventSnapshot(const std::string& path) {
+    std::lock_guard<std::mutex> lock(g_AlertMutex);
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) return false;
+
+    out << "Ratt1fy Event Snapshot\n";
+    out << "Generated: " << NowString() << "\n\n";
+    for (const auto& ev : g_Events) {
+        out << "[" << RiskLabel(ev.riskPercent) << "] " << ev.category << "\n";
+        out << "Message: " << ev.message << "\n";
+        out << "Evidence: " << ev.evidence << "\n\n";
+    }
+    return true;
+}
 
 int RiskFromSeverity(Severity s) {
     switch (s) {
@@ -83,18 +205,18 @@ void ApplySmoothStyle() {
     colors[ImGuiCol_WindowBg] = Ratt1fy::BgColor;
     colors[ImGuiCol_ChildBg] = Ratt1fy::CardBgColor;
     colors[ImGuiCol_Border] = Ratt1fy::BorderColor;
-    colors[ImGuiCol_FrameBg] = ImVec4(0.14f, 0.19f, 0.25f, 0.55f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.24f, 0.31f, 0.40f, 0.70f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.28f, 0.40f, 0.53f, 0.85f);
-    colors[ImGuiCol_Button] = ImVec4(0.17f, 0.24f, 0.34f, 0.65f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.42f, 0.58f, 0.92f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.32f, 0.55f, 0.73f, 0.95f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.11f, 0.26f, 0.20f, 0.58f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.16f, 0.39f, 0.30f, 0.75f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.19f, 0.50f, 0.37f, 0.90f);
+    colors[ImGuiCol_Button] = ImVec4(0.12f, 0.30f, 0.22f, 0.76f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.18f, 0.53f, 0.36f, 0.96f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.25f, 0.75f, 0.48f, 1.00f);
     colors[ImGuiCol_CheckMark] = Ratt1fy::AccentColor;
     colors[ImGuiCol_SliderGrab] = Ratt1fy::AccentColor;
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.52f, 0.86f, 1.00f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.14f, 0.21f, 0.31f, 0.58f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.28f, 0.42f, 0.54f, 0.88f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.31f, 0.53f, 0.72f, 0.90f);
+    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.48f, 1.00f, 0.68f, 1.00f);
+    colors[ImGuiCol_Header] = ImVec4(0.10f, 0.32f, 0.22f, 0.62f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.17f, 0.48f, 0.32f, 0.90f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.24f, 0.64f, 0.42f, 0.94f);
 }
 
 void RealTimeMonitor::Alert(const std::string& category, const std::string& msg,
@@ -123,34 +245,75 @@ void DrawBackgroundDecor() {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
-    g_OverlayOpacity = MathLerp(g_OverlayOpacity, 195.0f, io.DeltaTime * 2.7f);
-    draw->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(4, 8, 14, (int)g_OverlayOpacity));
+    g_OverlayOpacity = MathLerp(g_OverlayOpacity, 56.0f, io.DeltaTime * 2.7f);
 
-    for (int i = 0; i < 9; ++i) {
-        float x = (io.DisplaySize.x / 8.0f) * i;
-        draw->AddCircleFilled(ImVec2(x, 120.0f + 26.0f * i), 130.0f, IM_COL32(70, 150, 255, 10), 64);
+    size_t desiredFlakeCount = g_LowPowerMode ? 60 : 160;
+    if (g_Snowflakes.size() != desiredFlakeCount) {
+        g_Snowflakes.clear();
+        std::mt19937 rng((unsigned)GetTickCount64());
+        std::uniform_real_distribution<float> xdist(0.0f, io.DisplaySize.x);
+        std::uniform_real_distribution<float> ydist(0.0f, io.DisplaySize.y);
+        std::uniform_real_distribution<float> speed(24.0f, 86.0f);
+        std::uniform_real_distribution<float> size(1.0f, 3.8f);
+        std::uniform_real_distribution<float> sway(0.4f, 1.8f);
+        for (size_t i = 0; i < desiredFlakeCount; ++i) {
+            g_Snowflakes.push_back({ xdist(rng), ydist(rng), speed(rng), size(rng), sway(rng) });
+        }
+    }
+
+    float time = ImGui::GetTime();
+    for (auto& flake : g_Snowflakes) {
+        flake.y += flake.speed * io.DeltaTime;
+        flake.x += sinf(time * flake.sway + flake.y * 0.02f) * 12.0f * io.DeltaTime;
+        if (flake.y > io.DisplaySize.y + 10.0f) {
+            flake.y = -10.0f;
+            flake.x = fmodf(flake.x + 90.0f, io.DisplaySize.x);
+        }
+        draw->AddCircleFilled(ImVec2(flake.x, flake.y), flake.size, IM_COL32(210, 255, 225, 160), 12);
+    }
+
+    if (!g_LowPowerMode) {
+        for (int i = 0; i < 8; ++i) {
+            float x = (io.DisplaySize.x / 7.0f) * i;
+            draw->AddCircleFilled(ImVec2(x, 110.0f + 34.0f * i), 160.0f, IM_COL32(80, 255, 170, (int)g_OverlayOpacity), 64);
+        }
     }
 }
 
+void RunFullDetectionSelfTest() {
+    if (!g_Monitor) return;
+    g_Monitor->Alert("Self-Test", "Browser DB access heuristic simulated", "Synthetic: Login Data read by non-browser", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "DPAPI theft heuristic simulated", "Synthetic: CryptUnprotectData + Login Data combo", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "Webhook exfil heuristic simulated", "Synthetic: discord.com/api/webhooks POST", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "External IP lookup heuristic simulated", "Synthetic: api.ipify.org + ifconfig.me", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "Registry persistence heuristic simulated", "Synthetic: HKCU\\...\\Run WindowsUpdate", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "Startup folder persistence heuristic simulated", "Synthetic: Startup\\svchost.exe", Severity::HIGH);
+    g_Monitor->Alert("Self-Test", "WMI subscription persistence heuristic simulated", "Synthetic: __EventFilter + CommandLineEventConsumer", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "Anti-analysis VM check heuristic simulated", "Synthetic: VMware/VirtualBox registry probes", Severity::MEDIUM);
+    g_Monitor->Alert("Self-Test", "AMSI/ETW patching heuristic simulated", "Synthetic: AmsiScanBuffer/EtwEventWrite patch attempt", Severity::CRITICAL);
+    g_Monitor->Alert("Self-Test", "RAT C2 beacon heuristic simulated", "Synthetic: AsyncRAT/remcos reverse_tcp", Severity::CRITICAL);
+}
+
 void DrawNotifications() {
+    if (g_PauseToasts) return;
     std::lock_guard<std::mutex> lock(g_AlertMutex);
     float dt = ImGui::GetIO().DeltaTime;
     ImVec2 viewSize = ImGui::GetIO().DisplaySize;
-    float currentY = 25.0f;
+    float currentY = viewSize.y - 20.0f;
 
     for (auto& alert : g_Alerts) {
         if (alert.lifeTime <= 0.0f) continue;
 
         float alpha = (alert.lifeTime < 1.0f) ? alert.lifeTime : 1.0f;
-        ImGui::SetNextWindowPos(ImVec2(viewSize.x - 430, currentY), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(viewSize.x - 430, currentY), ImGuiCond_Always, ImVec2(0.0f, 1.0f));
         ImGui::SetNextWindowSize(ImVec2(400, 0));
         ImGui::SetNextWindowBgAlpha(alpha * 0.88f);
 
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.72f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.42f, 1.0f, 0.62f, 1.0f));
         ImGui::Begin((std::string("##alert_") + alert.time + alert.title).c_str(), nullptr,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
 
-        ImGui::TextColored(ImVec4(0.62f, 0.88f, 1.0f, 1.0f), "INTERCEPTED • %s", alert.title.c_str());
+        ImGui::TextColored(ImVec4(0.58f, 1.0f, 0.70f, 1.0f), "INTERCEPTED • %s", alert.title.c_str());
         ImGui::TextWrapped("%s", alert.message.c_str());
         ImGui::Separator();
         ImGui::Text("Risk: %d%% (%s)", alert.riskPercent, RiskLabel(alert.riskPercent));
@@ -159,7 +322,7 @@ void DrawNotifications() {
         ImGui::PopStyleColor();
 
         alert.lifeTime -= dt;
-        currentY += ImGui::GetWindowHeight() + 12.0f;
+        currentY -= ImGui::GetWindowHeight() + 12.0f;
     }
 }
 
@@ -179,17 +342,17 @@ void RenderRattifyUI(ImFont* titleFont) {
 
         ImDrawList* fg = ImGui::GetWindowDrawList();
         fg->AddRectFilledMultiColor(sideMin, sideMax,
-            IM_COL32(28, 46, 74, 210), IM_COL32(40, 81, 121, 210),
-            IM_COL32(15, 28, 48, 210), IM_COL32(22, 43, 70, 210));
+            IM_COL32(12, 56, 35, 220), IM_COL32(22, 112, 64, 220),
+            IM_COL32(8, 36, 24, 220), IM_COL32(12, 68, 40, 220));
 
         ImGui::BeginChild("Sidebar", ImVec2(245, 0), true);
         {
             ImGui::SetCursorPos(ImVec2(28, 32));
             if (titleFont) ImGui::PushFont(titleFont);
-            ImGui::TextColored(ImVec4(0.70f, 0.90f, 1.0f, 1.0f), "RATT1FY");
+            ImGui::TextColored(ImVec4(0.56f, 1.0f, 0.68f, 1.0f), "RATT1FY");
             if (titleFont) ImGui::PopFont();
             ImGui::SetCursorPosX(28);
-            ImGui::TextColored(ImVec4(0.64f, 0.72f, 0.82f, 0.92f), "Stealer Detection Console");
+            ImGui::TextColored(ImVec4(0.74f, 0.98f, 0.82f, 0.98f), "Neon Detection Console");
 
             ImGui::SetCursorPosY(120);
             const char* tabs[] = { "Dashboard", "Interceptor Log", "Settings", "Exit" };
@@ -219,9 +382,80 @@ void RenderRattifyUI(ImFont* titleFont) {
                     if (g_Monitor) g_MonitorRunning ? g_Monitor->Start() : g_Monitor->Stop();
                 }
 
+                ImGui::SameLine();
+                if (ImGui::Button("Run Webhook Self-Test", ImVec2(260, 54))) {
+                    if (g_Monitor) {
+                        g_Monitor->Alert(
+                            "Self-Test",
+                            "Synthetic webhook detection test triggered from UI",
+                            "Local validation only. No outbound request was made.",
+                            Severity::INFO
+                        );
+                    }
+                }
+
                 ImGui::Spacing();
                 ImGui::Checkbox("Auto-Block on High/Critical", &g_BlockingEnabled);
                 if (g_Monitor) g_Monitor->enableBlocking = g_BlockingEnabled;
+
+                ImGui::Checkbox("Pause Toast Notifications", &g_PauseToasts);
+                ImGui::Checkbox("Low-Power UI (higher FPS)", &g_LowPowerMode);
+
+                ImGui::SliderInt("Process Scan Interval (ms)", &g_ProcessScanMs, 400, 8000);
+                ImGui::SliderInt("Network Scan Interval (ms)", &g_NetworkScanMs, 600, 12000);
+                if (ImGui::Button("Apply Scan Intervals", ImVec2(260, 32)) && g_Monitor) {
+                    g_Monitor->SetScanIntervals(g_ProcessScanMs, g_NetworkScanMs);
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Run One-Shot Deep Scan", ImVec2(260, 32)) && g_Monitor) {
+                    g_Monitor->RequestOneShotScan();
+                }
+
+                ImGui::InputText("Exclude Process (exe)", g_ExcludeProcessInput, IM_ARRAYSIZE(g_ExcludeProcessInput));
+                if (ImGui::Button("Add Process Exclusion", ImVec2(260, 32)) && g_Monitor && strlen(g_ExcludeProcessInput) > 0) {
+                    std::wstring w;
+                    for (char c : std::string(g_ExcludeProcessInput)) w.push_back((wchar_t)c);
+                    g_Monitor->AddProcessExclusion(w);
+                    g_Monitor->Alert("Exclusion", "Process exclusion added", g_ExcludeProcessInput, Severity::INFO);
+                    g_ExcludeProcessInput[0] = '\0';
+                }
+
+                if (ImGui::Button("Clear In-Memory Events", ImVec2(260, 32))) {
+                    std::lock_guard<std::mutex> lock(g_AlertMutex);
+                    g_Events.clear();
+                    g_Alerts.clear();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Export Event Snapshot", ImVec2(260, 32))) {
+                    bool ok = ExportEventSnapshot("detections_snapshot.txt");
+                    g_TestWebhookStatus = ok ? "Exported detections_snapshot.txt" : "Failed to export snapshot";
+                }
+
+                if (ImGui::Button("Run Full Detection Self-Test", ImVec2(260, 32))) {
+                    RunFullDetectionSelfTest();
+                }
+
+                ImGui::Spacing();
+                ImGui::InputText("Discord Webhook URL", g_TestWebhookUrl, IM_ARRAYSIZE(g_TestWebhookUrl));
+                if (ImGui::Button("Send Webhook Test Message", ImVec2(260, 40))) {
+                    std::string err;
+                    bool sent = SendWebhookTestMessage(g_TestWebhookUrl, err);
+                    if (sent) {
+                        g_TestWebhookStatus = "Webhook test sent successfully";
+                        if (g_Monitor) {
+                            g_Monitor->Alert("Webhook Test", "Manual webhook test message sent", g_TestWebhookUrl, Severity::INFO);
+                        }
+                    }
+                    else {
+                        g_TestWebhookStatus = "Webhook test failed: " + err;
+                        if (g_Monitor) {
+                            g_Monitor->Alert("Webhook Test", "Manual webhook test failed", err, Severity::LOW);
+                        }
+                    }
+                }
+                if (!g_TestWebhookStatus.empty()) {
+                    ImGui::TextWrapped("%s", g_TestWebhookStatus.c_str());
+                }
 
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -234,15 +468,32 @@ void RenderRattifyUI(ImFont* titleFont) {
                 }
                 ImGui::Text("Intercepted events: %d", totalEvents);
                 ImGui::Text("Critical events: %d", critical);
-                ImGui::TextWrapped("Enabled detections: sensitive file access, webhook patterns, suspicious process-name heuristics.");
+                if (g_Monitor) {
+                    auto stats = g_Monitor->GetStats();
+                    ImGui::Text("Runtime detections: %d", stats.detections);
+                    ImGui::Text("Blocked processes: %d", stats.blocked);
+                    ImGui::Text("Advanced scans: %d", stats.advancedScans);
+                }
+                ImGui::TextWrapped("Enabled detections: sensitive file access, webhook and IP-lookup memory patterns, suspicious process-name heuristics, trusted system-process suppression, and cooldown throttling.");
             }
             else if (g_ActiveTab == 1) {
                 ImGui::Text("INTERCEPTOR CONSOLE");
                 ImGui::Separator();
+                ImGui::InputText("Search", g_LogSearch, IM_ARRAYSIZE(g_LogSearch));
+                ImGui::Combo("Min Severity", &g_MinSeverityFilter, "INFO\0LOW\0MEDIUM\0HIGH\0CRITICAL\0");
 
                 ImGui::BeginChild("LogScroll", ImVec2(0, 0), true);
                 std::lock_guard<std::mutex> lock(g_AlertMutex);
                 for (const auto& ev : g_Events) {
+                    if ((int)ev.severity < g_MinSeverityFilter) continue;
+                    if (strlen(g_LogSearch) > 0) {
+                        std::string query = g_LogSearch;
+                        if (ev.category.find(query) == std::string::npos &&
+                            ev.message.find(query) == std::string::npos &&
+                            ev.evidence.find(query) == std::string::npos) {
+                            continue;
+                        }
+                    }
                     ImVec4 c = ImVec4(0.60f, 0.84f, 1.f, 1.f);
                     if (ev.severity == Severity::HIGH) c = ImVec4(1.0f, 0.68f, 0.28f, 1.0f);
                     if (ev.severity == Severity::CRITICAL) c = ImVec4(1.0f, 0.34f, 0.34f, 1.0f);
@@ -279,7 +530,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int main() {
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "RattifyClass", NULL };
     RegisterClassEx(&wc);
-    HWND hwnd = CreateWindowEx(WS_EX_TOPMOST, wc.lpszClassName, "Ratt1fy Guard", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), NULL, NULL, wc.hInstance, NULL);
+    HWND hwnd = CreateWindowEx(0, wc.lpszClassName, "Ratt1fy Guard", WS_POPUP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), NULL, NULL, wc.hInstance, NULL);
 
     HDC hdc = GetDC(hwnd);
     PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd), 1, PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER, PFD_TYPE_RGBA, 32 };
@@ -314,7 +565,7 @@ int main() {
 
         ImGui::Render();
         glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(0, 0, 0, 0);
+        glClearColor(0.05f, 0.10f, 0.07f, 0.15f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SwapBuffers(hdc);
