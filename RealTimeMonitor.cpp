@@ -396,7 +396,7 @@ void RealTimeMonitor::FileWatchThread() {
     DebugLog("File watch thread started");
     for (const auto& dir : watchPaths) {
         if (!fs::exists(dir)) {
-            DebugLog("Watch path does not exist: " + std::string(dir.begin(), dir.end()));
+            DebugLog("Watch path does not exist: " + WideToUtf8(dir));
             continue;
         }
         HANDLE hDir = CreateFileW(
@@ -408,7 +408,7 @@ void RealTimeMonitor::FileWatchThread() {
             NULL
         );
         if (hDir == INVALID_HANDLE_VALUE) {
-            DebugLog("Failed to open directory: " + std::string(dir.begin(), dir.end()));
+            DebugLog("Failed to open directory: " + WideToUtf8(dir));
             continue;
         }
 

@@ -70,6 +70,8 @@ struct Snowflake {
 
 static std::vector<Snowflake> g_Snowflakes;
 
+const char* RiskLabel(int risk);
+
 bool SendWebhookTestMessage(const std::string& webhookUrl, std::string& errorOut) {
     if (webhookUrl.empty() || webhookUrl.find("https://") != 0) {
         errorOut = "Webhook URL must start with https://";
